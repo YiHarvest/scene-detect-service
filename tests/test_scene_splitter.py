@@ -226,6 +226,7 @@ class TestTaskManagement:
         # 应该与上传响应匹配
         assert data["taskId"] == task_id
         assert data["originalFilename"] == "test.mp4"
+        assert data == upload_response.json()
 
     def test_delete_task(self, client: TestClient, temp_video):
         """测试删除任务。"""
