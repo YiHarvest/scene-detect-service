@@ -109,6 +109,8 @@ class TaskStorage:
                 index=seg.index,
                 start_seconds=seg.start_seconds,
                 end_seconds=seg.end_seconds,
+                start_frame=seg.start_frame,
+                end_frame=seg.end_frame,
                 size_bytes=seg.size_bytes,
                 filename=seg.filename,
             )
