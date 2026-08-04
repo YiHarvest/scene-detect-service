@@ -137,6 +137,10 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
         content=create_error_response(
             code=ErrorCode.INTERNAL_ERROR,
             message="发生未预期的错误",
+            details={
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
         ),
     )
 
