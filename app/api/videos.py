@@ -20,7 +20,7 @@ from app.errors import (
     raise_task_not_found,
     raise_unsupported_media_type,
 )
-from app.schemas import SegmentResponse, SplitVideoResponse
+from app.schemas import ManifestSegment, SegmentResponse, SplitVideoResponse
 from app.services.scene_splitter import SplitResult, split_video_by_scenes
 from app.services.task_storage import get_task_storage
 
@@ -162,13 +162,14 @@ async def get_task(
 
     # 加载清单
     manifest = task_storage.load_manifest(task_id)
+    segments = _build_manifest_segment_responses(task_id, manifest.segments)
 
     return SplitVideoResponse(
         task_id=manifest.task_id,
         original_filename=manifest.original_filename,
         duration_seconds=manifest.duration_seconds,
         scene_count=manifest.scene_count,
-        segments=manifest.segments,
+        segments=segments,
     )
 
 
@@ -287,5 +288,38 @@ def _build_segment_responses(task_id: str, result: SplitResult) -> list[SegmentR
             download_url=f"/api/v1/videos/split/{task_id}/segments/{scene.index}",
         )
         segments.append(segment)
+
+    return segments
+
+
+def _build_manifest_segment_responses(
+    task_id: str, manifest_segments: list[ManifestSegment],
+) -> list[SegmentResponse]:
+    """从持久化清单构建公开分片响应。"""
+    segments = []
+
+    for segment in manifest_segments:
+        # 旧版清单未保存帧号；沿用分割器的 30 FPS 近似策略。
+        start_frame = segment.start_frame
+        end_frame = segment.end_frame
+        if start_frame is None or end_frame is None:
+            start_frame = int(segment.start_seconds * 30)
+            end_frame = max(start_frame + 1, int(segment.end_seconds * 30))
+
+        segments.append(
+            SegmentResponse(
+                index=segment.index,
+                start_seconds=segment.start_seconds,
+                end_seconds=segment.end_seconds,
+                duration_seconds=segment.end_seconds - segment.start_seconds,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                size_bytes=segment.size_bytes,
+                filename=segment.filename,
+                download_url=(
+                    f"/api/v1/videos/split/{task_id}/segments/{segment.index}"
+                ),
+            )
+        )
 
     return segments
