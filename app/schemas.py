@@ -25,13 +25,19 @@ class SegmentResponse(ApiModel):
     index: int = Field(ge=1)
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
+    duration_seconds: float = Field(gt=0)
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(gt=0)
     size_bytes: int = Field(gt=0)
+    filename: str
     download_url: str
 
     @model_validator(mode="after")
     def validate_time_range(self) -> "SegmentResponse":
         if self.end_seconds <= self.start_seconds:
             raise ValueError("end_seconds 必须大于 start_seconds")
+        if self.end_frame <= self.start_frame:
+            raise ValueError("end_frame 必须大于 start_frame")
         return self
 
 
@@ -39,7 +45,9 @@ class SplitVideoResponse(ApiModel):
     """视频分割后返回的结果。"""
 
     task_id: str
+    original_filename: str
     duration_seconds: float = Field(gt=0)
+    scene_count: int = Field(gt=0)
     segments: list[SegmentResponse]
 
 
