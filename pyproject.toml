@@ -1,0 +1,36 @@
+[project]
+name = "scene-detect-service"
+version = "0.1.0"
+description = "Video scene detection and splitting service using PySceneDetect"
+readme = "README.md"
+authors = [
+    { name = "YiHarvest", email = "YiHarvest@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "fastapi>=0.141.1",
+    "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.32",
+    "scenedetect>=0.7.1",
+    "uvicorn>=0.52.1",
+]
+
+[project.scripts]
+scene-detect-service = "app.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "app"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.1",
+]
