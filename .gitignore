@@ -48,6 +48,9 @@ htmlcov/
 .env
 .env.local
 
+# Package manager
+uv.lock
+
 # Project specific
 workspace/
 docs/
