@@ -4,7 +4,7 @@
 """
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -57,8 +57,22 @@ class ManifestSegment(BaseModel):
     index: int = Field(ge=1)
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
+    start_frame: int | None = Field(default=None, ge=0)
+    end_frame: int | None = Field(default=None, gt=0)
     size_bytes: int = Field(gt=0)
     filename: str
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> "ManifestSegment":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("end_seconds 必须大于 start_seconds")
+        if (
+            self.start_frame is not None
+            and self.end_frame is not None
+            and self.end_frame <= self.start_frame
+        ):
+            raise ValueError("end_frame 必须大于 start_frame")
+        return self
 
 
 class Manifest(BaseModel):
@@ -68,10 +82,27 @@ class Manifest(BaseModel):
     task_id: str
     original_filename: str
     duration_seconds: float = Field(gt=0)
+    scene_count: int = Field(gt=0)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
     segments: list[ManifestSegment]
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_scene_count(cls, data: Any) -> Any:
+        """兼容未保存 scene_count 的旧版清单。"""
+        if isinstance(data, dict) and "scene_count" not in data:
+            segments = data.get("segments")
+            if isinstance(segments, list):
+                return {**data, "scene_count": len(segments)}
+        return data
+
+    @model_validator(mode="after")
+    def validate_scene_count(self) -> "Manifest":
+        if self.scene_count != len(self.segments):
+            raise ValueError("scene_count 必须等于 segments 数量")
+        return self
 
 
 class HealthResponse(ApiModel):
