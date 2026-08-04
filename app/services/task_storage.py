@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from app.config import Settings, get_settings
 from app.errors import raise_task_not_found
-from app.schemas import Manifest, SegmentResponse
+from app.schemas import Manifest, ManifestSegment, SegmentResponse
 
 logger = logging.getLogger(__name__)
 
@@ -96,21 +96,33 @@ class TaskStorage:
             task_id: 任务标识符
             original_filename: 原始上传文件名
             duration_seconds: 视频总时长
-            segments: 视频分片列表
+            segments: 视频分片列表（SegmentResponse 对象）
 
         Returns:
             创建的清单对象
         """
         self._validate_task_id(task_id)
 
+        # 将 SegmentResponse 转换为 ManifestSegment
+        manifest_segments = [
+            ManifestSegment(
+                index=seg.index,
+                start_seconds=seg.start_seconds,
+                end_seconds=seg.end_seconds,
+                size_bytes=seg.size_bytes,
+                filename=seg.filename,
+            )
+            for seg in segments
+        ]
+
         manifest = Manifest(
             version=1,
             task_id=task_id,
             original_filename=original_filename,
             duration_seconds=duration_seconds,
-            scene_count=len(segments),
+            scene_count=len(manifest_segments),
             created_at=datetime.now(timezone.utc),
-            segments=segments,
+            segments=manifest_segments,
         )
 
         manifest_path = self.get_manifest_path(task_id)

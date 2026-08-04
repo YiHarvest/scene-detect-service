@@ -137,7 +137,7 @@ def create_error_response(
     ).model_dump()
 
 
-# Convenience functions for common errors
+# 便捷函数 - 常见错误
 def raise_invalid_video(message: str, details: Any = None) -> None:
     """抛出无效视频错误。
     
@@ -207,34 +207,34 @@ def raise_file_too_large(size_bytes: int, max_bytes: int) -> None:
 
 
 def raise_unsupported_media_type(content_type: str) -> None:
-    """Raise an unsupported media type error."""
+    """抛出不支持的媒体类型错误。"""
     raise AppException(
         code=ErrorCode.UNSUPPORTED_MEDIA_TYPE,
-        message=f"Unsupported media type: {content_type}",
+        message=f"不支持的媒体类型：{content_type}",
         status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
     )
 
 
 def raise_ffmpeg_unavailable() -> None:
-    """Raise an FFmpeg unavailable error."""
+    """抛出 FFmpeg 不可用错误。"""
     raise AppException(
         code=ErrorCode.FFMPEG_UNAVAILABLE,
-        message="FFmpeg is not available",
+        message="FFmpeg 不可用",
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 
 
 def raise_ffprobe_unavailable() -> None:
-    """Raise an FFprobe unavailable error."""
+    """抛出 FFprobe 不可用错误。"""
     raise AppException(
         code=ErrorCode.FFPROBE_UNAVAILABLE,
-        message="FFprobe is not available",
+        message="FFprobe 不可用",
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 
 
 def raise_scene_detection_failed(message: str, details: Any = None) -> None:
-    """Raise a scene detection failed error."""
+    """抛出场景检测失败错误。"""
     raise AppException(
         code=ErrorCode.SCENE_DETECTION_FAILED,
         message=message,
@@ -244,7 +244,7 @@ def raise_scene_detection_failed(message: str, details: Any = None) -> None:
 
 
 def raise_video_split_failed(message: str, details: Any = None) -> None:
-    """Raise a video split failed error."""
+    """抛出视频分割失败错误。"""
     raise AppException(
         code=ErrorCode.VIDEO_SPLIT_FAILED,
         message=message,
