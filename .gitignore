@@ -53,6 +53,7 @@ uv.lock
 
 # Project specific
 workspace/
+docs/
 
 # OS
 .DS_Store
