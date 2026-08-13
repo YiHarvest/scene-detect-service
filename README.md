@@ -102,7 +102,8 @@ Response:
       "endFrame": 252,
       "sizeBytes": 4562132,
       "filename": "segment-001.mp4",
-      "downloadUrl": "/api/v1/videos/split/6fc24bee8df44ff8a67047d69c61be01/segments/1"
+      "downloadUrl": "/api/v1/videos/split/6fc24bee8df44ff8a67047d69c61be01/segments/1",
+      "directVideoUrl": "https://video.example.com/api/v1/videos/split/6fc24bee8df44ff8a67047d69c61be01/segments/1"
     }
   ]
 }
@@ -161,6 +162,7 @@ Environment variables can be set in `.env` file:
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server host address |
 | `PORT` | `28200` | Server port |
+| `PUBLIC_BASE_URL` | unset | Public HTTP(S) origin and optional base path used for absolute segment URLs |
 | `WORKSPACE_ROOT` | `./workspace` | Directory for task storage |
 | `MAX_UPLOAD_BYTES` | `209715200` | Maximum upload size (200 MB) |
 | `TASK_TTL_SECONDS` | `3600` | Task expiration time (1 hour) |

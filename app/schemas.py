@@ -6,7 +6,7 @@
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -31,6 +31,7 @@ class SegmentResponse(ApiModel):
     size_bytes: int = Field(gt=0)
     filename: str
     download_url: str
+    direct_video_url: AnyHttpUrl
 
     @model_validator(mode="after")
     def validate_time_range(self) -> "SegmentResponse":
@@ -83,9 +84,7 @@ class Manifest(BaseModel):
     original_filename: str
     duration_seconds: float = Field(gt=0)
     scene_count: int = Field(gt=0)
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     segments: list[ManifestSegment]
 
     @model_validator(mode="before")

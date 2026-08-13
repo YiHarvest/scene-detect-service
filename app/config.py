@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # 服务器配置
     host: str = Field(default="0.0.0.0", description="服务器主机地址")
     port: int = Field(default=28200, ge=1, le=65535, description="服务器端口")
+    public_base_url: AnyHttpUrl | None = Field(
+        default=None,
+        description="用于生成可公开访问链接的 HTTP(S) 基础 URL",
+    )
 
     # 工作目录配置
     workspace_root: Path = Field(
@@ -33,9 +37,7 @@ class Settings(BaseSettings):
         ge=1,
         description="最大上传文件大小（字节）",
     )
-    task_ttl_seconds: int = Field(
-        default=3600, ge=0, description="任务生存时间（秒）"
-    )
+    task_ttl_seconds: int = Field(default=3600, ge=0, description="任务生存时间（秒）")
 
     # FFmpeg 配置
     ffmpeg_path: str = Field(default="ffmpeg", description="FFmpeg 可执行文件路径")
@@ -48,9 +50,7 @@ class Settings(BaseSettings):
     scene_min_length_seconds: float = Field(
         default=0.8, ge=0.0, description="最小场景长度（秒）"
     )
-    scene_window_width: int = Field(
-        default=2, ge=1, description="自适应检测窗口宽度"
-    )
+    scene_window_width: int = Field(default=2, ge=1, description="自适应检测窗口宽度")
     scene_min_content_value: float = Field(
         default=15.0, ge=0.0, description="场景检测最小内容值"
     )

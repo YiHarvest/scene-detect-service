@@ -7,7 +7,7 @@ import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse
 
@@ -37,11 +37,13 @@ router = APIRouter(prefix="/api/v1/videos", tags=["videos"])
     description="上传视频文件，检测场景并分割成片段",
 )
 async def split_video(
+    request: Request,
     file: Annotated[UploadFile, File(description="要分割的 MP4 视频文件")],
 ) -> SplitVideoResponse:
     """基于场景检测将视频分割成片段。
 
     Args:
+        request: 当前 HTTP 请求，用于生成切片绝对地址
         file: 上传的视频文件
 
     Returns:
@@ -98,7 +100,14 @@ async def split_video(
         result = await split_video_by_scenes(source_path, segments_dir, settings)
 
         # 构建分片响应
-        segments = _build_segment_responses(task_id, result)
+        segments = _build_segment_responses(
+            request,
+            task_id,
+            result,
+            public_base_url=(
+                str(settings.public_base_url) if settings.public_base_url else None
+            ),
+        )
 
         # 保存清单
         task_storage.save_manifest(
@@ -139,11 +148,13 @@ async def split_video(
     description="获取已完成分割任务的信息",
 )
 async def get_task(
+    request: Request,
     task_id: Annotated[str, PathParam(description="任务 ID（UUID4 hex）")],
 ) -> SplitVideoResponse:
     """获取任务信息。
 
     Args:
+        request: 当前 HTTP 请求，用于生成切片绝对地址
         task_id: 任务标识符
 
     Returns:
@@ -153,6 +164,7 @@ async def get_task(
         AppException: 如果任务未找到
     """
     task_storage = get_task_storage()
+    settings = get_settings()
 
     # 验证 task_id 格式
     try:
@@ -162,7 +174,14 @@ async def get_task(
 
     # 加载清单
     manifest = task_storage.load_manifest(task_id)
-    segments = _build_manifest_segment_responses(task_id, manifest.segments)
+    segments = _build_manifest_segment_responses(
+        request,
+        task_id,
+        manifest.segments,
+        public_base_url=(
+            str(settings.public_base_url) if settings.public_base_url else None
+        ),
+    )
 
     return SplitVideoResponse(
         task_id=manifest.task_id,
@@ -260,12 +279,19 @@ async def delete_task(
     task_storage.delete_task(task_id)
 
 
-def _build_segment_responses(task_id: str, result: SplitResult) -> list[SegmentResponse]:
+def _build_segment_responses(
+    request: Request,
+    task_id: str,
+    result: SplitResult,
+    public_base_url: str | None,
+) -> list[SegmentResponse]:
     """构建分片响应对象。
 
     Args:
+        request: 当前 HTTP 请求，用于生成切片地址
         task_id: 任务标识符
         result: 场景分割器的分割结果
+        public_base_url: 可选的公开 HTTP(S) 基础地址
 
     Returns:
         SegmentResponse 对象列表
@@ -275,6 +301,12 @@ def _build_segment_responses(task_id: str, result: SplitResult) -> list[SegmentR
     for scene, segment_path in zip(result.scenes, result.segment_files):
         # 获取实际文件大小
         size_bytes = segment_path.stat().st_size
+        download_url, direct_video_url = _build_segment_urls(
+            request,
+            task_id,
+            scene.index,
+            public_base_url,
+        )
 
         segment = SegmentResponse(
             index=scene.index,
@@ -285,7 +317,8 @@ def _build_segment_responses(task_id: str, result: SplitResult) -> list[SegmentR
             end_frame=scene.end_frame,
             size_bytes=size_bytes,
             filename=segment_path.name,
-            download_url=f"/api/v1/videos/split/{task_id}/segments/{scene.index}",
+            download_url=download_url,
+            direct_video_url=direct_video_url,
         )
         segments.append(segment)
 
@@ -293,7 +326,10 @@ def _build_segment_responses(task_id: str, result: SplitResult) -> list[SegmentR
 
 
 def _build_manifest_segment_responses(
-    task_id: str, manifest_segments: list[ManifestSegment],
+    request: Request,
+    task_id: str,
+    manifest_segments: list[ManifestSegment],
+    public_base_url: str | None,
 ) -> list[SegmentResponse]:
     """从持久化清单构建公开分片响应。"""
     segments = []
@@ -306,6 +342,13 @@ def _build_manifest_segment_responses(
             start_frame = int(segment.start_seconds * 30)
             end_frame = max(start_frame + 1, int(segment.end_seconds * 30))
 
+        download_url, direct_video_url = _build_segment_urls(
+            request,
+            task_id,
+            segment.index,
+            public_base_url,
+        )
+
         segments.append(
             SegmentResponse(
                 index=segment.index,
@@ -316,10 +359,30 @@ def _build_manifest_segment_responses(
                 end_frame=end_frame,
                 size_bytes=segment.size_bytes,
                 filename=segment.filename,
-                download_url=(
-                    f"/api/v1/videos/split/{task_id}/segments/{segment.index}"
-                ),
+                download_url=download_url,
+                direct_video_url=direct_video_url,
             )
         )
 
     return segments
+
+
+def _build_segment_urls(
+    request: Request,
+    task_id: str,
+    segment_index: int,
+    public_base_url: str | None,
+) -> tuple[str, str]:
+    """构建切片的相对下载地址和公开绝对地址。"""
+    route_params = {
+        "task_id": task_id,
+        "segment_index": str(segment_index),
+    }
+    download_url = str(request.app.url_path_for("download_segment", **route_params))
+
+    if public_base_url:
+        direct_video_url = f"{public_base_url.rstrip('/')}{download_url}"
+    else:
+        direct_video_url = str(request.url_for("download_segment", **route_params))
+
+    return download_url, direct_video_url

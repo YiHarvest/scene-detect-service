@@ -12,6 +12,7 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.main import app
 
 
@@ -154,6 +155,15 @@ class TestVideoUpload:
         assert "sizeBytes" in segment
         assert "filename" in segment
         assert "downloadUrl" in segment
+        assert "directVideoUrl" in segment
+        assert segment["directVideoUrl"] == (
+            f"http://testserver{segment['downloadUrl']}"
+        )
+
+        # 直链应直接返回对应的视频切片
+        direct_response = client.get(segment["directVideoUrl"])
+        assert direct_response.status_code == status.HTTP_200_OK
+        assert direct_response.headers["content-type"] == "video/mp4"
 
         # 检查大小为正数
         assert segment["sizeBytes"] > 0
@@ -170,12 +180,15 @@ class TestVideoUpload:
         data = response.json()
 
         # 应该有多个分片
-        assert data["sceneCount"] >= 1
-        assert len(data["segments"]) >= 1
+        assert data["sceneCount"] > 1
+        assert len(data["segments"]) > 1
 
         # 检查分片顺序
         for i, segment in enumerate(data["segments"], start=1):
             assert segment["index"] == i
+            assert segment["directVideoUrl"] == (
+                f"http://testserver{segment['downloadUrl']}"
+            )
 
         # 检查时间范围是连续的
         segments = data["segments"]
@@ -228,6 +241,38 @@ class TestTaskManagement:
         assert data["originalFilename"] == "test.mp4"
         assert data == upload_response.json()
 
+    def test_direct_video_url_uses_configured_public_base_path(
+        self,
+        client: TestClient,
+        temp_video: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """测试公开基础路径用于 POST 和 GET 返回的切片直链。"""
+        monkeypatch.setattr(
+            get_settings(),
+            "public_base_url",
+            "https://video.example.com/media/",
+        )
+
+        with open(temp_video, "rb") as f:
+            upload_response = client.post(
+                "/api/v1/videos/split",
+                files={"file": ("test.mp4", f, "video/mp4")},
+            )
+
+        assert upload_response.status_code == status.HTTP_200_OK
+        upload_data = upload_response.json()
+        task_id = upload_data["taskId"]
+
+        get_response = client.get(f"/api/v1/videos/split/{task_id}")
+
+        assert get_response.status_code == status.HTTP_200_OK
+        assert get_response.json() == upload_data
+        for segment in upload_data["segments"]:
+            assert segment["directVideoUrl"] == (
+                "https://video.example.com/media" + segment["downloadUrl"]
+            )
+
     def test_delete_task(self, client: TestClient, temp_video):
         """测试删除任务。"""
         # 上传视频
@@ -263,9 +308,7 @@ class TestSegmentDownload:
         task_id = upload_response.json()["taskId"]
 
         # 下载第一个分片
-        download_response = client.get(
-            f"/api/v1/videos/split/{task_id}/segments/1"
-        )
+        download_response = client.get(f"/api/v1/videos/split/{task_id}/segments/1")
 
         assert download_response.status_code == status.HTTP_200_OK
         assert download_response.headers["content-type"] == "video/mp4"
@@ -286,9 +329,7 @@ class TestSegmentDownload:
         task_id = upload_response.json()["taskId"]
 
         # 尝试下载分片 999
-        response = client.get(
-            f"/api/v1/videos/split/{task_id}/segments/999"
-        )
+        response = client.get(f"/api/v1/videos/split/{task_id}/segments/999")
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
 

@@ -100,7 +100,8 @@ curl -X POST \
       "endFrame": 252,
       "sizeBytes": 4562132,
       "filename": "segment-001.mp4",
-      "downloadUrl": "/api/v1/videos/split/6fc24bee8df44ff8a67047d69c61be01/segments/1"
+      "downloadUrl": "/api/v1/videos/split/6fc24bee8df44ff8a67047d69c61be01/segments/1",
+      "directVideoUrl": "https://video.example.com/api/v1/videos/split/6fc24bee8df44ff8a67047d69c61be01/segments/1"
     }
   ]
 }
@@ -132,6 +133,7 @@ curl -X DELETE http://127.0.0.1:28200/api/v1/videos/split/{task_id}
 |--------|--------|------|
 | HOST | 0.0.0.0 | 服务绑定地址 |
 | PORT | 28200 | 服务端口 |
+| PUBLIC_BASE_URL | 未设置 | 用于生成切片绝对地址的公开 HTTP(S) 域名及可选基础路径 |
 | WORKSPACE_ROOT | ./workspace | 工作目录 |
 | FFMPEG_PATH | ffmpeg | FFmpeg 可执行文件路径 |
 | FFPROBE_PATH | ffprobe | FFprobe 可执行文件路径 |
