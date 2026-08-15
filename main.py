@@ -34,11 +34,13 @@ def main():
         action="store_true",
         help="启用开发模式自动重载",
     )
+    # 并发由进程内任务队列（QUEUE_WORKER_COUNT）控制，uvicorn 必须单进程。
+    # 多进程会导致每个进程各有一个队列、重复处理同一任务。
     parser.add_argument(
         "--workers",
         type=int,
         default=1,
-        help="工作进程数（默认：1）",
+        help="工作进程数（必须为 1；并发由任务队列 QUEUE_WORKER_COUNT 控制）",
     )
 
     args = parser.parse_args()

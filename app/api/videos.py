@@ -1,6 +1,7 @@
 """视频场景检测和分割的 API 路由。
 
-提供视频上传、分割、查询和下载的 REST API 端点。
+提供视频上传（入队）、状态查询、分片下载和任务删除的 REST API 端点。
+分割在后台队列中执行，POST 立即返回任务状态，客户端轮询 GET 获取结果。
 """
 
 import logging
@@ -14,15 +15,20 @@ from fastapi.responses import FileResponse
 from app.config import get_settings
 from app.errors import (
     AppException,
+    ErrorDetail,
     raise_file_too_large,
     raise_invalid_video,
     raise_segment_missing,
     raise_task_not_found,
     raise_unsupported_media_type,
 )
-from app.schemas import ManifestSegment, SegmentResponse, SplitVideoResponse
-from app.services.scene_splitter import SplitResult, split_video_by_scenes
-from app.services.task_storage import get_task_storage
+from app.schemas import JobStatusResponse, ManifestSegment, SegmentResponse
+from app.services.job_queue import get_job_queue
+from app.services.task_storage import (
+    TASK_CANCELLED,
+    TASK_QUEUED,
+    get_task_storage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,24 +37,21 @@ router = APIRouter(prefix="/api/v1/videos", tags=["videos"])
 
 @router.post(
     "/split",
-    response_model=SplitVideoResponse,
-    status_code=status.HTTP_200_OK,
-    summary="按场景分割视频",
-    description="上传视频文件，检测场景并分割成片段",
+    response_model=JobStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="提交视频分割任务",
+    description="上传视频文件，创建分割任务并入队；通过 GET 查询处理状态与结果",
 )
 async def split_video(
     file: Annotated[UploadFile, File(description="要分割的 MP4 视频文件")],
-) -> SplitVideoResponse:
-    """基于场景检测将视频分割成片段。
+) -> JobStatusResponse:
+    """上传视频并入队分割任务。
 
     Args:
         file: 上传的视频文件
 
     Returns:
-        SplitVideoResponse：包含任务 ID 和分片信息
-
-    Raises:
-        AppException: 如果验证、检测或分割失败
+        JobStatusResponse：任务 ID 与 queued 状态
     """
     settings = get_settings()
     task_storage = get_task_storage()
@@ -87,38 +90,28 @@ async def split_video(
             logger.info(f"已保存 {total_size} 字节到 {source_path}")
 
         except AppException:
-            # 重新抛出 AppException（如 file_too_large）
             raise
         except OSError as e:
             logger.error(f"保存上传文件失败：{e}")
             raise_invalid_video(f"保存上传文件失败：{e!s}")
 
-        # 按场景分割视频
-        segments_dir = task_storage.get_segments_dir(task_id)
-        result = await split_video_by_scenes(source_path, segments_dir, settings)
+        # 入队：状态落盘后交给 worker 池处理
+        task_storage.write_status(task_id, TASK_QUEUED, original_filename=file.filename)
+        if not get_job_queue().enqueue(task_id):
+            task_storage.delete_task(task_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="视频处理队列已满，请稍后重试",
+            )
 
-        # 构建分片响应
-        segments = _build_segment_responses(task_id, result)
-
-        # 保存清单
-        task_storage.save_manifest(
+        logger.info(f"任务 {task_id} 已入队（{total_size} 字节）")
+        return JobStatusResponse(
             task_id=task_id,
+            status="queued",
             original_filename=file.filename,
-            duration_seconds=result.duration_seconds,
-            segments=segments,
         )
 
-        logger.info(f"任务 {task_id} 完成，共 {len(segments)} 个分片")
-
-        return SplitVideoResponse(
-            task_id=task_id,
-            original_filename=file.filename,
-            duration_seconds=result.duration_seconds,
-            scene_count=len(segments),
-            segments=segments,
-        )
-
-    except AppException:
+    except (AppException, HTTPException):
         # 出错时清理任务
         task_storage.delete_task(task_id)
         raise
@@ -134,23 +127,20 @@ async def split_video(
 
 @router.get(
     "/split/{task_id}",
-    response_model=SplitVideoResponse,
-    summary="获取任务信息",
-    description="获取已完成分割任务的信息",
+    response_model=JobStatusResponse,
+    summary="获取任务状态与结果",
+    description="查询任务状态；done 时附带完整的切片清单，failed 时附带错误详情",
 )
 async def get_task(
     task_id: Annotated[str, PathParam(description="任务 ID（UUID4 hex）")],
-) -> SplitVideoResponse:
-    """获取任务信息。
+) -> JobStatusResponse:
+    """获取任务状态与结果。
 
     Args:
         task_id: 任务标识符
 
     Returns:
-        SplitVideoResponse：包含任务信息
-
-    Raises:
-        AppException: 如果任务未找到
+        JobStatusResponse：包含任务状态；done 时包含切片清单
     """
     task_storage = get_task_storage()
 
@@ -160,16 +150,37 @@ async def get_task(
     except ValueError:
         raise_task_not_found(task_id)
 
-    # 加载清单
-    manifest = task_storage.load_manifest(task_id)
-    segments = _build_manifest_segment_responses(task_id, manifest.segments)
+    status_data = task_storage.read_status(task_id)
+    if status_data is None:
+        # 兼容旧版任务：无 status.json 但 manifest 存在视为 done
+        if task_storage.get_manifest_path(task_id).exists():
+            status_data = {"status": "done", "original_filename": None}
+        else:
+            raise_task_not_found(task_id)
 
-    return SplitVideoResponse(
-        task_id=manifest.task_id,
-        original_filename=manifest.original_filename,
-        duration_seconds=manifest.duration_seconds,
-        scene_count=manifest.scene_count,
-        segments=segments,
+    task_status = status_data.get("status")
+
+    # done：加载清单返回完整结果
+    if task_status == "done":
+        manifest = task_storage.load_manifest(task_id)
+        segments = _build_manifest_segment_responses(task_id, manifest.segments)
+        return JobStatusResponse(
+            task_id=manifest.task_id,
+            status="done",
+            original_filename=manifest.original_filename,
+            duration_seconds=manifest.duration_seconds,
+            scene_count=manifest.scene_count,
+            segments=segments,
+        )
+
+    # 非终态：只返回状态与错误
+    error_data = status_data.get("error")
+    error = ErrorDetail(**error_data) if error_data else None
+    return JobStatusResponse(
+        task_id=task_id,
+        status=task_status or "queued",
+        original_filename=status_data.get("original_filename"),
+        error=error,
     )
 
 
@@ -234,7 +245,7 @@ async def download_segment(
     "/split/{task_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除任务",
-    description="删除任务及其所有文件",
+    description="删除任务及其所有文件；处理中的任务标记取消，由 worker 完成后清理",
 )
 async def delete_task(
     task_id: Annotated[str, PathParam(description="任务 ID（UUID4 hex）")],
@@ -256,40 +267,27 @@ async def delete_task(
         # 对无效 ID 返回 204（幂等）
         return
 
-    # 删除任务（幂等）
-    task_storage.delete_task(task_id)
+    status_data = task_storage.read_status(task_id)
 
+    # 无状态（旧任务或不存在）：幂等删除目录
+    if status_data is None:
+        task_storage.delete_task(task_id)
+        return
 
-def _build_segment_responses(task_id: str, result: SplitResult) -> list[SegmentResponse]:
-    """构建分片响应对象。
-
-    Args:
-        task_id: 任务标识符
-        result: 场景分割器的分割结果
-
-    Returns:
-        SegmentResponse 对象列表
-    """
-    segments = []
-
-    for scene, segment_path in zip(result.scenes, result.segment_files):
-        # 获取实际文件大小
-        size_bytes = segment_path.stat().st_size
-
-        segment = SegmentResponse(
-            index=scene.index,
-            start_seconds=scene.start_seconds,
-            end_seconds=scene.end_seconds,
-            duration_seconds=scene.end_seconds - scene.start_seconds,
-            start_frame=scene.start_frame,
-            end_frame=scene.end_frame,
-            size_bytes=size_bytes,
-            filename=segment_path.name,
-            download_url=f"/api/v1/videos/split/{task_id}/segments/{scene.index}",
-        )
-        segments.append(segment)
-
-    return segments
+    task_status = status_data.get("status")
+    if task_status == TASK_QUEUED:
+        # 排队中：标记取消并立即删除；worker 取到后看到已取消/目录不存在会跳过
+        task_storage.write_status(task_id, TASK_CANCELLED)
+        task_storage.delete_task(task_id)
+    elif task_status == TASK_CANCELLED:
+        # 已取消但 worker 尚未完成清理：保持现状，worker 或重启恢复会清理
+        return
+    elif task_status == "processing":
+        # 处理中：标记取消，worker 完成后自行清理整批
+        task_storage.write_status(task_id, TASK_CANCELLED)
+    else:
+        # done / failed：直接删除
+        task_storage.delete_task(task_id)
 
 
 def _build_manifest_segment_responses(

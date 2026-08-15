@@ -4,10 +4,12 @@
 """
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
+
+from app.errors import ErrorDetail
 
 
 class ApiModel(BaseModel):
@@ -17,6 +19,12 @@ class ApiModel(BaseModel):
         alias_generator=to_camel,
         populate_by_name=True,
     )
+
+
+# 任务状态机:queued → processing → done | failed | cancelled
+JobStatus: TypeAlias = Literal[
+    "queued", "processing", "done", "failed", "cancelled"
+]
 
 
 class SegmentResponse(ApiModel):
@@ -39,6 +47,19 @@ class SegmentResponse(ApiModel):
         if self.end_frame <= self.start_frame:
             raise ValueError("end_frame 必须大于 start_frame")
         return self
+
+
+class JobStatusResponse(ApiModel):
+    """任务状态（异步队列视图）。done 时附带完整切片结果。"""
+
+    task_id: str
+    status: JobStatus
+    original_filename: str | None = None
+    error: ErrorDetail | None = None
+    # done 时填充
+    duration_seconds: float | None = None
+    scene_count: int | None = None
+    segments: list[SegmentResponse] | None = None
 
 
 class SplitVideoResponse(ApiModel):

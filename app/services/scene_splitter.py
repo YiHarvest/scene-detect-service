@@ -1,8 +1,11 @@
 """核心场景检测和视频分割逻辑。
 
 使用 PySceneDetect 检测视频场景，使用 FFmpeg 分割视频。
+支持 NVIDIA NVENC 硬件编码（通过 arg_override 注入 ffmpeg 参数），
+auto 模式探测不可用时自动回退 libx264。
 """
 
+import asyncio
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -16,6 +19,9 @@ from app.errors import raise_scene_detection_failed, raise_video_split_failed
 from app.services.video_validator import validate_video_and_extract_metadata
 
 logger = logging.getLogger(__name__)
+
+# NVENC 探测结果缓存：None=未探测，True/False=是否可用
+_nvenc_available_cache: bool | None = None
 
 
 @dataclass
@@ -110,26 +116,42 @@ async def split_video_by_scenes(
     logger.info(f"检测到 {len(scenes)} 个场景")
 
     # 使用 FFmpeg 分割视频
-    logger.info(f"正在将视频分割为 {len(scenes)} 个片段")
-    try:
-        # 使用 PySceneDetect 的 split_video_ffmpeg
-        result = split_video_ffmpeg(
+    encode_args = _build_encode_args(settings)
+    logger.info(
+        f"正在将视频分割为 {len(scenes)} 个片段（编码："
+        + ("NVENC" if "nvenc" in encode_args else "libx264 CPU")
+        + "）"
+    )
+    def run_split(arguments: str) -> None:
+        """运行一次分割并正确检查 PySceneDetect 返回的整数退出码。"""
+        return_code = split_video_ffmpeg(
             str(input_path),
-            scene_list if scene_list else None,
+            scene_list,
             output_dir=str(output_directory),
             output_file_template="segment-$SCENE_NUMBER.mp4",
             show_progress=False,
+            arg_override=arguments,
         )
+        if return_code != 0:
+            raise RuntimeError(f"FFmpeg 返回码 {return_code}")
 
-        # 检查返回码
-        if result is not None and hasattr(result, "returncode") and result.returncode != 0:
-            raise_video_split_failed(
-                f"FFmpeg 分割失败，返回码 {result.returncode}"
-            )
-
-    except (OSError, RuntimeError) as e:
-        logger.error(f"视频分割失败：{e}")
-        raise_video_split_failed(f"分割视频失败：{e!s}")
+    try:
+        run_split(encode_args)
+    except (OSError, RuntimeError) as error:
+        # 探测帧成功不代表每种输入都能由 NVENC 编码。auto 模式下实际任务
+        # 失败时清掉半成品并重试 CPU，cuda 模式则按显式配置直接报错。
+        if settings.ffmpeg_hw_accel == "auto" and "h264_nvenc" in encode_args:
+            logger.warning(f"NVENC 实际分割失败（{error}），改用 libx264 重试")
+            for partial in output_directory.glob("segment-*.mp4"):
+                partial.unlink(missing_ok=True)
+            try:
+                run_split(_build_cpu_encode_args(settings))
+            except (OSError, RuntimeError) as fallback_error:
+                logger.error(f"CPU 视频分割重试失败：{fallback_error}")
+                raise_video_split_failed(f"分割视频失败：{fallback_error!s}")
+        else:
+            logger.error(f"视频分割失败：{error}")
+            raise_video_split_failed(f"分割视频失败：{error!s}")
 
     # 验证分片是否已创建
     segment_files = _verify_segments(output_directory, len(scenes))
@@ -151,16 +173,113 @@ async def _check_ffmpeg_executable(ffmpeg_path: str) -> bool:
     Returns:
         如果 FFmpeg 可用则返回 True
     """
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_path,
+            "-version",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await asyncio.wait_for(process.wait(), timeout=5) == 0
+    except TimeoutError:
+        if process is not None:
+            process.kill()
+            await process.wait()
+        return False
+    except (FileNotFoundError, PermissionError):
+        return False
+
+
+def _nvenc_available(settings: Settings) -> bool:
+    """探测 NVIDIA NVENC 编码器是否真正可用（结果缓存）。
+
+    只查 `ffmpeg -encoders` 不够：ffmpeg 编译进 h264_nvenc 不代表驱动支持
+    （驱动版本过低会在打开编码器时报 "Driver does not support the required
+    nvenc API version"）。这里用 lavfi 源实际编码 1 帧，退出码 0 才算可用。
+
+    任一条件不满足返回 False，调用方回退 libx264。
+    """
+    global _nvenc_available_cache
+    if _nvenc_available_cache is not None:
+        return _nvenc_available_cache
+
     try:
         result = subprocess.run(
-            [ffmpeg_path, "-version"],
+            [
+                settings.ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                # 部分 NVENC 驱动拒绝 16x16（低于编码器最小尺寸），会造成误判。
+                "color=black:size=128x128:rate=1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "h264_nvenc",
+                "-f",
+                "null",
+                "-",
+            ],
             capture_output=True,
             check=False,
-            timeout=5,
+            timeout=15,
         )
-        return result.returncode == 0
+        nvenc_ok = result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+        nvenc_ok = False
+
+    if not nvenc_ok:
+        stderr = result.stderr.decode("utf-8", errors="replace") if "result" in locals() else ""
+        detail = stderr.strip().splitlines()[0] if stderr.strip() else "未知原因"
+        _nvenc_available_cache = False
+        logger.warning(f"NVENC 编码器不可用（{detail}），回退 libx264 CPU 编码")
         return False
+
+    _nvenc_available_cache = True
+    logger.info("检测到 NVIDIA NVENC，视频分割将使用 GPU 编码")
+    return True
+
+
+def _build_encode_args(settings: Settings) -> str:
+    """构建 split_video_ffmpeg 的 arg_override。
+
+    - cuda/auto：NVENC 可用时使用 GPU 编码（精确切点 + 硬件加速）
+    - none 或探测失败：libx264 CPU 编码
+
+    注意：不能注入 `-hwaccel`（ffmpeg 输入选项必须位于 -i 之前，而
+    arg_override 被 scenedetect 追加在 -i 之后，会解析报错），因此解码
+    始终走 CPU；NVENC 只加速编码部分，这已是分割耗时的大头。
+
+    保留 scenedetect 默认的 map/音频参数，只替换视频编码器部分。
+    """
+    base = "-map 0:v:0 -map 0:a? -map 0:s? -c:a aac"
+
+    use_nvenc = (
+        settings.ffmpeg_hw_accel in ("cuda", "auto")
+        and _nvenc_available(settings)
+    )
+    if use_nvenc:
+        quality = max(0, min(51, settings.ffmpeg_encoder_quality))
+        preset = settings.ffmpeg_encoder_preset.strip() or "p4"
+        return (
+            f"{base} -c:v h264_nvenc -preset {preset} "
+            f"-rc vbr -cq {quality} -b:v 0"
+        )
+
+    return _build_cpu_encode_args(settings)
+
+
+def _build_cpu_encode_args(settings: Settings) -> str:
+    """构建稳定的 CPU 编码参数，供常规路径和 auto 失败回退共用。"""
+    quality = max(0, min(51, settings.ffmpeg_encoder_quality))
+    return (
+        "-map 0:v:0 -map 0:a? -map 0:s? -c:a aac "
+        f"-c:v libx264 -preset veryfast -crf {quality}"
+    )
 
 
 def _convert_scene_list(scene_list: list[Any], total_duration: float) -> list[SceneInfo]:

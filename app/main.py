@@ -16,6 +16,7 @@ from app.errors import (
     create_error_response,
 )
 from app.schemas import HealthResponse
+from app.services.job_queue import get_job_queue
 from app.services.task_storage import get_task_storage
 from app.services.video_validator import (
     check_ffmpeg_available,
@@ -44,9 +45,16 @@ async def lifespan(app: FastAPI):
     if deleted > 0:
         logger.info(f"启动时清理了 {deleted} 个过期任务")
 
+    # 启动任务队列：先启动 worker，再恢复中断任务；恢复量超过队列容量时
+    # worker 可同步消费，保证任务不会因容量限制丢失。
+    job_queue = get_job_queue()
+    job_queue.start()
+    await job_queue.recover_pending()
+
     yield
 
     # 关闭
+    await job_queue.shutdown()
     logger.info("正在关闭场景检测服务")
 
 

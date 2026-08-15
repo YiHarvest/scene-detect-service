@@ -18,6 +18,16 @@ from app.schemas import Manifest, ManifestSegment, SegmentResponse
 
 logger = logging.getLogger(__name__)
 
+# 任务状态机:queued → processing → done | failed | cancelled
+TASK_QUEUED = "queued"
+TASK_PROCESSING = "processing"
+TASK_DONE = "done"
+TASK_FAILED = "failed"
+TASK_CANCELLED = "cancelled"
+TASK_STATUSES = frozenset(
+    {TASK_QUEUED, TASK_PROCESSING, TASK_DONE, TASK_FAILED, TASK_CANCELLED}
+)
+
 
 class TaskStorage:
     """管理任务目录和元数据。"""
@@ -82,6 +92,75 @@ class TaskStorage:
         """
         self._validate_task_id(task_id)
         return self._get_task_dir(task_id) / "manifest.json"
+
+    def get_status_path(self, task_id: str) -> Path:
+        """获取任务状态文件路径。
+
+        Args:
+            task_id: 任务标识符
+
+        Returns:
+            status.json 的路径
+        """
+        self._validate_task_id(task_id)
+        return self._get_task_dir(task_id) / "status.json"
+
+    def read_status(self, task_id: str) -> dict | None:
+        """读取任务状态；无状态文件时返回 None。"""
+        status_path = self.get_status_path(task_id)
+        if not status_path.exists():
+            return None
+        try:
+            with open(status_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"读取任务 {task_id} 状态失败：{e}")
+            return None
+
+    def write_status(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        error: dict | None = None,
+        original_filename: str | None = None,
+        started_at: float | None = None,
+        finished_at: float | None = None,
+        attempt: int | None = None,
+    ) -> dict:
+        """原子地写入任务状态并返回。"""
+        self._validate_task_id(task_id)
+        if status not in TASK_STATUSES:
+            raise ValueError(f"非法任务状态：{status}")
+
+        status_path = self.get_status_path(task_id)
+        previous = self.read_status(task_id) or {}
+        payload = {
+            "task_id": task_id,
+            "status": status,
+            "error": error,
+            "original_filename": original_filename
+            if original_filename is not None
+            else previous.get("original_filename"),
+            "started_at": started_at
+            if started_at is not None
+            else previous.get("started_at"),
+            "finished_at": finished_at,
+            "attempt": attempt if attempt is not None else previous.get("attempt", 0),
+            "updated_at": time.time(),
+        }
+        temp_path = status_path.with_suffix(".tmp")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, status_path)
+        except OSError:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise
+        return payload
 
     def save_manifest(
         self,
@@ -247,14 +326,29 @@ class TaskStorage:
                 except ValueError:
                     continue
 
-                # 检查清单修改时间
-                manifest_path = task_dir / "manifest.json"
-                if manifest_path.exists():
-                    mtime = manifest_path.stat().st_mtime
-                    age_seconds = current_time - mtime
+                # 状态以 status.json 为准（异步队列），缺失时回退到清单 mtime。
+                # 仅清理终态任务；queued/processing 由 recover 接管，不受 TTL 影响，
+                # 避免排队中/处理中的任务被误删。
+                status = self.read_status(task_dir.name)
+                task_status = status.get("status") if status else None
+                if task_status in {TASK_QUEUED, TASK_PROCESSING}:
+                    continue
 
-                    if age_seconds > ttl_seconds and self.delete_task(task_dir.name):
+                # 用 status.json 的 updated_at 作为年龄依据；无状态文件时回退 manifest mtime
+                if status is not None:
+                    mtime = status.get("updated_at") or status.get("finished_at") or 0.0
+                else:
+                    manifest_path = task_dir / "manifest.json"
+                    if not manifest_path.exists():
+                        # 无状态也无清单：半成品任务目录，直接清理
+                        if self.delete_task(task_dir.name):
                             deleted_count += 1
+                        continue
+                    mtime = manifest_path.stat().st_mtime
+
+                age_seconds = current_time - mtime
+                if age_seconds > ttl_seconds and self.delete_task(task_dir.name):
+                    deleted_count += 1
 
         except OSError as e:
             logger.error(f"清理任务时出错：{e}")

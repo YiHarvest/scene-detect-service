@@ -55,6 +55,47 @@ class Settings(BaseSettings):
         default=15.0, ge=0.0, description="场景检测最小内容值"
     )
 
+    # 任务队列配置
+    # 并发 worker 数：同时处理的视频数。每个视频占用 1 路 NVENC + 1 个 CPU 线程，
+    # 建议不超过可用 GPU 编码路数；默认 4 在单张 4090（8 路 NVENC 上限）下安全。
+    queue_worker_count: int = Field(
+        default=4, ge=1, le=64, description="队列 worker 协程数（并发视频数上限）"
+    )
+    # 失败任务最大重试次数（0 = 不重试）。排队/处理中进程崩溃重启后由 recover 重置入队，
+    # 不占用此配额。
+    queue_max_retries: int = Field(
+        default=1, ge=0, le=5, description="失败任务最大重试次数"
+    )
+    queue_max_size: int = Field(
+        default=20, ge=1, le=1000, description="等待队列最大任务数"
+    )
+    queue_shutdown_grace_seconds: float = Field(
+        default=30.0, ge=0.0, le=600.0, description="关停时等待任务完成的秒数"
+    )
+
+    # GPU / 编码配置
+    # none: 纯 CPU（libx264）；cuda: 使用 NVIDIA NVENC（auto 探测，失败回退 libx264）
+    ffmpeg_hw_accel: str = Field(
+        default="auto", description="FFmpeg 硬件加速：auto | cuda | none"
+    )
+    # NVENC 画质（CRF 等价物，0-51，越小越好）；CPU 模式忽略，使用 crf
+    ffmpeg_encoder_quality: int = Field(
+        default=23, ge=0, le=51, description="编码质量（NVENC 用 -cq，libx264 用 -crf）"
+    )
+    # NVENC 预设（p1 最快 ~ p7 最好）；CPU 模式忽略，使用 veryfast
+    ffmpeg_encoder_preset: str = Field(
+        default="p4", description="NVENC 预设 p1-p7"
+    )
+
+    @field_validator("ffmpeg_hw_accel")
+    @classmethod
+    def validate_ffmpeg_hw_accel(cls, value: str) -> str:
+        """只接受明确的硬件加速模式，避免拼写错误静默降级。"""
+        normalized = value.strip().lower()
+        if normalized not in {"auto", "cuda", "none"}:
+            raise ValueError("FFMPEG_HW_ACCEL 必须是 auto、cuda 或 none")
+        return normalized
+
     @field_validator("workspace_root", mode="before")
     @classmethod
     def resolve_workspace_path(cls, v: str | Path) -> Path:
